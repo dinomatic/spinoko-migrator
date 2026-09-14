@@ -47,7 +47,13 @@ class Spinoko_Migrator_Cleanup_Command
      * : List what would be removed without removing anything.
      *
      * [--force]
-     * : Permanently delete instead of moving to trash.
+     * : Permanently delete instead of moving to trash. Note: `import` reads
+     * a casino/slot's original post_content/author/date/featured-image
+     * live off this same v2 post by ID at creation time (see its
+     * restoreOriginalPostFields()) — a trashed post is still readable that
+     * way if you ever need to re-run `import` for one that errored, but a
+     * --force-deleted one is gone for good, so a later re-run creates the
+     * casino/slot without any of that restored data.
      *
      * ## EXAMPLES
      *
@@ -77,6 +83,10 @@ class Spinoko_Migrator_Cleanup_Command
 
         $prefix = $dry_run ? '[DRY RUN] ' : '';
         $verb = $force ? 'permanently deleted' : 'trashed';
+
+        if ($force) {
+            WP_CLI::warning('--force permanently deletes — if you ever need to re-run `import` for a casino/slot that errored, it reads the original v2 post live by ID to restore content/author/date/featured image (see restoreOriginalPostFields()), which only works if that original post still exists (even trashed). A --force-deleted one loses that for good.');
+        }
 
         if ($casinos !== []) {
             WP_CLI::log("Casinos ({$verb}):");

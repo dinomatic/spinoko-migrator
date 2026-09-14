@@ -9,17 +9,27 @@ use Spinoko\Core\CasinoCpt;
 /**
  * `wp spinoko-migrator convert-blocks` — a separate, optional step from
  * `import`/`cleanup-legacy` (never run automatically by either). Rewrites
- * existing posts/pages' post_content *in place*: same install, same post
- * IDs, nothing created — only v2's acf/* blocks inside get swapped for a
- * native v3 equivalent where one genuinely exists. A post with no acf/*
- * blocks at all is never touched. A block with no real v3 equivalent is
- * left exactly as it is (inert once v2's block registration is gone
- * under v3, but harmless — still listed in the report for manual
- * rebuilding).
+ * existing posts/pages' *and* the newly-migrated casino/slot posts'
+ * post_content *in place*: same install, same post IDs, nothing created
+ * — only v2's acf/* blocks inside get swapped for a native v3 equivalent
+ * where one genuinely exists. A post with no acf/* blocks at all is
+ * never touched. A block with no real v3 equivalent is left exactly as
+ * it is (inert once v2's block registration is gone under v3, but
+ * harmless — still listed in the report for manual rebuilding). Legacy,
+ * not-yet-cleaned-up v2 casino posts (same signature as isV3Casino()/
+ * findLegacyCasinos() elsewhere in this plugin) are skipped — they're
+ * about to be trashed by `cleanup-legacy` regardless of which order
+ * these optional steps run in, so converting their content would be
+ * wasted work and would double up each casino in the report.
  *
  * Runs entirely against the live site — no export JSON involved, same
  * reasoning as `import`'s importPosts()/importMenus(): block markup is
  * plain post_content, unaffected by which theme happens to be active.
+ * The casino/slot posts' content itself isn't read from the export JSON
+ * either, even one step upstream — `import`'s restoreOriginalPostFields()
+ * copies it live off v2's original post by ID (see that method's
+ * docblock) — so by the time this command runs, it's just live
+ * post_content like any other.
  *
  * Every mapping below was decided explicitly (not guessed) against the
  * actual v2 field definitions and v3 block.json attribute schemas:
@@ -121,8 +131,9 @@ class Spinoko_Migrator_Convert_Blocks_Command
     private array $untouchedPosts = [];
 
     /**
-     * Converts v2 acf/* blocks in existing posts/pages to native v3
-     * blocks, in place, where a real equivalent exists.
+     * Converts v2 acf/* blocks in existing posts/pages and migrated
+     * casino/slot posts to native v3 blocks, in place, where a real
+     * equivalent exists.
      *
      * ## OPTIONS
      *
@@ -151,8 +162,13 @@ class Spinoko_Migrator_Convert_Blocks_Command
         $dry_run = isset($assoc_args['dry-run']);
         $report_path = (string) ($assoc_args['report'] ?? 'spinoko-block-conversion-report.md');
 
+        // 'casino'/'slot' included alongside 'post'/'page': import's
+        // restoreOriginalPostFields() now copies v2's original
+        // post_content onto every freshly-created v3 casino/slot, so it
+        // can carry the exact same unconvertible acf/* blocks — see
+        // this class's docblock.
         $ids = get_posts([
-            'post_type' => ['post', 'page'],
+            'post_type' => ['post', 'page', CasinoCpt::POST_TYPE, 'slot'],
             'post_status' => 'any',
             'numberposts' => -1,
             'fields' => 'ids',
@@ -163,6 +179,17 @@ class Spinoko_Migrator_Convert_Blocks_Command
         foreach ($ids as $id) {
             $post = get_post($id);
             if (! $post) {
+                continue;
+            }
+
+            // A leftover v2-era 'casino' post that import's
+            // suffixLegacyCasinoSlugs() renamed out of the way (see this
+            // class's docblock) — same signature check as isV3Casino()/
+            // findLegacyCasinos() elsewhere in this plugin. Skipped so a
+            // convert-blocks run before cleanup-legacy doesn't waste a
+            // conversion pass on a post that's about to be trashed, and
+            // doesn't double up each casino in the report.
+            if ($post->post_type === CasinoCpt::POST_TYPE && (string) get_post_meta($id, 'casino_name', true) === '') {
                 continue;
             }
 
@@ -623,7 +650,7 @@ class Spinoko_Migrator_Convert_Blocks_Command
 
         WP_CLI::log('');
         WP_CLI::log(sprintf(
-            '%s%d post(s)/page(s) fully converted, %d partially converted, %d left untouched (no convertible blocks found).',
+            '%s%d post(s)/page(s)/casino(s)/slot(s) fully converted, %d partially converted, %d left untouched (no convertible blocks found).',
             $prefix,
             $tally['converted'],
             $tally['partial'],
@@ -641,7 +668,7 @@ class Spinoko_Migrator_Convert_Blocks_Command
 
         if ($this->untouchedPosts !== []) {
             WP_CLI::log('');
-            WP_CLI::warning(count($this->untouchedPosts).' post(s)/page(s) have acf blocks with no v3 equivalent at all — still need manual rebuilding:');
+            WP_CLI::warning(count($this->untouchedPosts).' post(s)/page(s)/casino(s)/slot(s) have acf blocks with no v3 equivalent at all — still need manual rebuilding:');
             foreach ($this->untouchedPosts as $untouched) {
                 WP_CLI::log(sprintf('  - [%s] %s  (%s)  %s', $untouched['type'], $untouched['title'], implode(', ', $untouched['left']), admin_url("post.php?post={$untouched['id']}&action=edit")));
             }

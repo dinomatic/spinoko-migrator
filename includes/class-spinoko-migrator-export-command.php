@@ -110,6 +110,14 @@ class Spinoko_Migrator_Export_Command
             // resolved so the original slug is actually free to reuse.
             'slug' => $post?->post_name ?? '',
             'status' => get_post_status($post_id),
+            // Same-install migration (see this plugin's docblock) — user
+            // IDs and attachment IDs stay valid across the theme switch,
+            // so these are carried through as raw IDs rather than
+            // usernames/URLs that would need re-resolving on import.
+            'author_id' => (int) ($post?->post_author ?? 0),
+            'date' => (string) ($post?->post_date ?? ''),
+            'date_gmt' => (string) ($post?->post_date_gmt ?? ''),
+            'featured_image_id' => (int) get_post_thumbnail_id($post_id),
             'name' => (string) get_field('name', $post_id),
             'affiliate_link' => (string) get_field('affiliate_link', $post_id),
             'logo_url' => $this->imageUrl(get_field('logo', $post_id)),
@@ -193,7 +201,7 @@ class Spinoko_Migrator_Export_Command
         foreach (['casino_1', 'casino_2', 'casino_3'] as $key) {
             $id = (int) ($top_3[$key] ?? 0);
             if ($id) {
-                $top_casino_titles[] = get_the_title($id);
+                $top_casino_titles[] = $this->rawTitle($id);
             }
         }
 
@@ -208,10 +216,14 @@ class Spinoko_Migrator_Export_Command
             // can put the migrated slot at its original v2 URL.
             'slug' => $game_post?->post_name ?? '',
             'status' => get_post_status($post_id),
+            'author_id' => (int) ($game_post?->post_author ?? 0),
+            'date' => (string) ($game_post?->post_date ?? ''),
+            'date_gmt' => (string) ($game_post?->post_date_gmt ?? ''),
+            'featured_image_id' => (int) get_post_thumbnail_id($post_id),
             'name' => (string) get_field('name', $post_id),
             'image_url' => $this->imageUrl(get_field('image', $post_id)),
             'rating' => get_field('rating', $post_id),
-            'linked_casino_title' => $casino_id ? get_the_title($casino_id) : '',
+            'linked_casino_title' => $casino_id ? $this->rawTitle($casino_id) : '',
             'top_casino_titles' => $top_casino_titles,
             'reels' => get_field('reels', $post_id),
             'rows' => get_field('rows', $post_id),
@@ -235,6 +247,19 @@ class Spinoko_Migrator_Export_Command
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
+
+    /**
+     * Raw post_title, not get_the_title() — see exportCasino()'s note.
+     * Used for cross-referenced titles (linked/top casinos) too: they
+     * feed into the import step's title-based lookups against other
+     * raw-titled records, so a filtered ('the_title'-run) value here
+     * would silently mismatch for any title with an apostrophe,
+     * ampersand, etc.
+     */
+    private function rawTitle(int $post_id): string
+    {
+        return get_post($post_id)?->post_title ?? '';
+    }
 
     private function imageUrl(mixed $image): string
     {

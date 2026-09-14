@@ -319,24 +319,12 @@ class Spinoko_Migrator_Import_Command
 
             // CasinoImporter::importOne() sets post_title from its
             // 'name' input (the ACF display name, e.g. "Slots Magic")
-            // and has no concept of a slug at all — force both back to
-            // v2's actual original values on a freshly-created post so
-            // the migrated casino's title and URL are unchanged from v2.
+            // and has no concept of a slug/author/date/thumbnail at all
+            // — restore all of v2's actual original values on a
+            // freshly-created post so the migrated casino is unchanged
+            // from v2 in every way that isn't its actual review content.
             if ($result['status'] === 'created' && $result['post_id']) {
-                $original_title = trim((string) ($casino['title'] ?? ''));
-                $original_slug = trim((string) ($casino['slug'] ?? ''));
-
-                $update = ['ID' => $result['post_id']];
-                if ($original_title !== '') {
-                    $update['post_title'] = $original_title;
-                }
-                if ($original_slug !== '') {
-                    $update['post_name'] = $original_slug;
-                }
-
-                if (count($update) > 1) {
-                    wp_update_post($update);
-                }
+                $this->restoreOriginalPostFields($result['post_id'], $casino, 'casino');
             }
         }
 
@@ -542,26 +530,14 @@ class Spinoko_Migrator_Import_Command
             $tally[$result['status']] = ($tally[$result['status']] ?? 0) + 1;
 
             // Same reasoning as importCasinos(): SlotImporter sets
-            // post_title from its 'name' input and has no slug concept
-            // at all, so force both back to v2's exact original values
-            // on a freshly-created post — no CPT collision here (v2's
-            // 'game' vs v3's 'slot'), so unlike casinos this needs no
-            // legacy-slug suffixing first, just the title/slug restore.
+            // post_title from its 'name' input and has no slug/author/
+            // date/thumbnail concept at all, so restore v2's exact
+            // original values on a freshly-created post — no CPT
+            // collision here (v2's 'game' vs v3's 'slot'), so unlike
+            // casinos this needs no legacy-slug suffixing first, just
+            // the restore itself.
             if ($result['status'] === 'created' && $result['post_id']) {
-                $original_title = trim((string) ($game['title'] ?? ''));
-                $original_slug = trim((string) ($game['slug'] ?? ''));
-
-                $update = ['ID' => $result['post_id']];
-                if ($original_title !== '') {
-                    $update['post_title'] = $original_title;
-                }
-                if ($original_slug !== '') {
-                    $update['post_name'] = $original_slug;
-                }
-
-                if (count($update) > 1) {
-                    wp_update_post($update);
-                }
+                $this->restoreOriginalPostFields($result['post_id'], $game, 'slot');
             }
         }
 
@@ -586,6 +562,82 @@ class Spinoko_Migrator_Import_Command
             'payline' => ($g['paylines'] ?? '') !== '' ? (string) $g['paylines'] : '',
             'progressive' => (bool) ($g['progressive'] ?? false),
         ];
+    }
+
+    /**
+     * CasinoImporter/SlotImporter know nothing about slug, author, date,
+     * post_content or featured image — restores all five from v2's
+     * original post onto a freshly-created v3 post. Author/featured
+     * image are resolved by ID straight off the export JSON (safe: same
+     * users table/media library, same-install migration — see this
+     * class's docblock); post_content, deliberately, is NOT read from
+     * the export JSON at all — it's plain post_content, unaffected by
+     * which theme is active, so it's read live off v2's original post
+     * (by the 'id' the export JSON carries) same as importPosts()/
+     * importMenus() already do for other plain-WordPress data, rather
+     * than bloating the JSON with a duplicate copy that could go stale
+     * between the export and import steps. That original post is still
+     * sitting untouched under that same ID right up until
+     * `cleanup-legacy` runs — suffixLegacyCasinoSlugs() only ever
+     * changes its slug/title, never its ID.
+     *
+     * Each piece is independently guarded (missing/deleted user,
+     * attachment, or original post just skips that one field) so a
+     * stale export doesn't fail the whole restore.
+     *
+     * The copied content is scanned for acf/* blocks the same way
+     * importPosts() already scans posts/pages — v2's casino/game
+     * post_content can carry the exact same unconvertible blocks, so a
+     * hit here is added to the same $flaggedPosts list/report section
+     * rather than silently landing on the new casino/slot unnoticed.
+     *
+     * @param 'casino'|'slot' $type only used for the flagged-posts report entry
+     */
+    private function restoreOriginalPostFields(int $post_id, array $original, string $type): void
+    {
+        $update = ['ID' => $post_id];
+
+        $title = trim((string) ($original['title'] ?? ''));
+        if ($title !== '') {
+            $update['post_title'] = $title;
+        }
+
+        $slug = trim((string) ($original['slug'] ?? ''));
+        if ($slug !== '') {
+            $update['post_name'] = $slug;
+        }
+
+        $author_id = (int) ($original['author_id'] ?? 0);
+        if ($author_id && get_userdata($author_id)) {
+            $update['post_author'] = $author_id;
+        }
+
+        $date = trim((string) ($original['date'] ?? ''));
+        if ($date !== '') {
+            $update['post_date'] = $date;
+            $date_gmt = trim((string) ($original['date_gmt'] ?? ''));
+            $update['post_date_gmt'] = $date_gmt !== '' ? $date_gmt : get_gmt_from_date($date);
+        }
+
+        $original_id = (int) ($original['id'] ?? 0);
+        $original_post = $original_id ? get_post($original_id) : null;
+        if ($original_post && $original_post->post_content !== '') {
+            $update['post_content'] = $original_post->post_content;
+
+            $acf_blocks = $this->detectAcfBlocks($original_post->post_content);
+            if ($acf_blocks !== []) {
+                $this->flaggedPosts[] = ['id' => $post_id, 'title' => $title, 'type' => $type, 'blocks' => $acf_blocks];
+            }
+        }
+
+        if (count($update) > 1) {
+            wp_update_post($update);
+        }
+
+        $thumbnail_id = (int) ($original['featured_image_id'] ?? 0);
+        if ($thumbnail_id && get_post($thumbnail_id)) {
+            set_post_thumbnail($post_id, $thumbnail_id);
+        }
     }
 
     // ---------------------------------------------------------------
@@ -779,9 +831,14 @@ class Spinoko_Migrator_Import_Command
         WP_CLI::log($prefix.'Posts:   '.$this->formatTally($posts));
         WP_CLI::log($prefix.'Menus:   '.$this->formatTally($menus));
 
+        if ($dry_run) {
+            WP_CLI::log('');
+            WP_CLI::warning('--dry-run does not preview ACF-block content flags for casinos/slots (only for posts/pages, above) — that check runs against post_content copied during actual post creation, which --dry-run skips. Run for real to see the full flagged list.');
+        }
+
         if ($this->flaggedPosts !== []) {
             WP_CLI::log('');
-            WP_CLI::warning(count($this->flaggedPosts).' post(s)/page(s) contain ACF blocks with no v3 equivalent — rebuild manually in the v3 editor, using the v2 content at the edit link below as reference:');
+            WP_CLI::warning(count($this->flaggedPosts).' post(s)/page(s)/casino(s)/slot(s) contain ACF blocks with no v3 equivalent — rebuild manually in the v3 editor, using the v2 content at the edit link below as reference:');
             foreach ($this->flaggedPosts as $flagged) {
                 WP_CLI::log(sprintf('  - [%s] %s  (%s)  %s', $flagged['type'], $flagged['title'], implode(', ', $flagged['blocks']), $this->editLink($flagged['id'])));
             }
@@ -848,6 +905,12 @@ class Spinoko_Migrator_Import_Command
         $lines[] = '';
         $lines[] = ($dry_run ? '**DRY RUN** — nothing was written. ' : '**Real run.** ').'Generated '.current_time('mysql').'.';
         $lines[] = '';
+
+        if ($dry_run) {
+            $lines[] = '**Note:** this dry run does not preview ACF-block content flags for casinos/slots (only for posts/pages, below) — that check runs against post_content copied during actual post creation, which a dry run skips. Run for real to see the full flagged list.';
+            $lines[] = '';
+        }
+
         $lines[] = '## Summary';
         $lines[] = '';
         $lines[] = '- Casinos: '.$this->formatTally($casinos);
@@ -857,7 +920,7 @@ class Spinoko_Migrator_Import_Command
         $lines[] = '';
 
         if ($this->flaggedPosts !== []) {
-            $lines[] = '## Posts/pages needing manual review (ACF blocks, no v3 equivalent)';
+            $lines[] = '## Posts/pages/casinos/slots needing manual review (ACF blocks, no v3 equivalent)';
             $lines[] = '';
             $lines[] = '| Type | Title | Blocks | Edit (v2 content) |';
             $lines[] = '|---|---|---|---|';
